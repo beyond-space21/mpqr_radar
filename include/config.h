@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 // Hardware wiring (Arduino Nano)
 //
- //  SIM7600G-H (SoftwareSerial; factory UART often 115200, locked to 9600 after AT)
+ //  SIM7600G-H @ MODEM_BAUD (9600)
  //    Nano D2 (RX)  <- SIM7600 TX
  //    Nano D3 (TX)  -> SIM7600 RX
  //    Nano D4       -> SIM7600 PWRKEY (only if MODEM_HAS_PWRKEY; pulse turns ON or OFF)
@@ -25,19 +25,17 @@
  // ---------------------------------------------------------------------------
 
 // --- SIM7600 pins ---
-static const uint8_t PIN_MODEM_RX = 2;   // Nano listens
-static const uint8_t PIN_MODEM_TX = 3;   // Nano transmits
+static const uint8_t PIN_MODEM_RX = 2;
+static const uint8_t PIN_MODEM_TX = 3;
 static const uint8_t PIN_MODEM_PWRKEY = 4;
-// false = assume modem already powered (safer while debugging).
-// true  = pulse PWRKEY on bring-up (can turn a running modem OFF).
 static const bool MODEM_HAS_PWRKEY = false;
-static const uint32_t MODEM_BAUD = 9600;  // SoftSerial-safe; modem UART locked here
+static const uint32_t MODEM_BAUD = 9600;
 
 // --- RS485 / radar pins ---
 static const uint8_t PIN_RS485_RX = 8;
 static const uint8_t PIN_RS485_TX = 9;
 static const uint8_t PIN_RS485_DE = 7;
-static const uint32_t RADAR_BAUD = 4800;  // this unit answers at 4800 (manual §3)
+static const uint32_t RADAR_BAUD = 4800;
 static const uint8_t RADAR_SLAVE_ADDR = 0x01;
 
 // --- Cellular ---
@@ -58,8 +56,8 @@ static const char TOPIC_TELEMETRY[] PROGMEM = "mpqr/radar/01/telemetry";
 static const char TOPIC_STATUS[] PROGMEM = "mpqr/radar/01/status";
 
 // --- Timing ---
-static const uint32_t PUBLISH_INTERVAL_MS = 30000UL;
-static const uint32_t MODEM_RECONNECT_MS = 15000UL;
-static const uint32_t NETWORK_WAIT_MS = 120000UL;
+static const uint32_t PUBLISH_INTERVAL_MS = 5000UL;
+static const uint32_t MODEM_RECONNECT_MS = 3000UL;
+static const uint32_t NETWORK_WAIT_MS = 10000UL;
 static const uint16_t MODBUS_RESPONSE_TIMEOUT_MS = 1500;
 static const uint16_t MODBUS_INTER_FRAME_MS = 5;

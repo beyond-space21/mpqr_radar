@@ -10,7 +10,13 @@ const els = {
   flow: $("flow"),
   vol: $("vol"),
   empty: $("empty"),
+  range: $("range"),
+  flow2: $("flow2"),
   dir: $("dir"),
+  csq: $("csq"),
+  mst: $("mst"),
+  sect: $("sect"),
+  dims: $("dims"),
   msgCount: $("msg-count"),
   broker: $("broker"),
   chart: $("chart"),
@@ -32,22 +38,47 @@ function dirLabel(d) {
   return "—";
 }
 
+function sectLabel(s) {
+  if (s === 1 || s === "1") return "trapezoid";
+  if (s === 2 || s === "2") return "rectangle";
+  return fmt(s, 0);
+}
+
+function csqLabel(c) {
+  if (c === null || c === undefined) return "—";
+  const n = Number(c);
+  if (n === 99) return "unknown";
+  // rough dBm: -113 + 2*csq
+  const dbm = -113 + 2 * n;
+  return `${n} (~${dbm} dBm)`;
+}
+
 function applySnapshot(s) {
   if (!s) return;
-  els.status.textContent = s.status || "—";
+  const r = s.latest || {};
+  els.status.textContent = r.mst || s.status || "—";
   els.statusMeta.textContent = s.status_at
     ? `updated ${s.status_at}`
-    : s.latest?.received_at
-      ? `last telemetry ${s.latest.received_at}`
+    : r.received_at
+      ? `last telemetry ${r.received_at}`
       : "waiting for MQTT…";
 
-  const r = s.latest || {};
   els.lvl.textContent = fmt(r.lvl, 0);
   els.vel.textContent = fmt(r.vel, 2);
   els.flow.textContent = fmt(r.flow, 3);
   els.vol.textContent = fmt(r.vol, 0);
   els.empty.textContent = fmt(r.empty, 0);
+  els.range.textContent = fmt(r.range, 0);
+  els.flow2.textContent = fmt(r.flow2, 0);
   els.dir.textContent = dirLabel(r.dir);
+  els.csq.textContent = csqLabel(r.csq);
+  els.mst.textContent = r.mst || "—";
+  els.sect.textContent = sectLabel(r.sect);
+  if (r.s1 != null || r.s2 != null || r.s3 != null) {
+    els.dims.textContent = `${fmt(r.s1, 0)} / ${fmt(r.s2, 0)} / ${fmt(r.s3, 0)}`;
+  } else {
+    els.dims.textContent = "—";
+  }
   els.msgCount.textContent = `${s.msg_count || 0} messages`;
   if (s.broker) {
     els.broker.textContent = `${s.broker.host}:${s.broker.port}`;

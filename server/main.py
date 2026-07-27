@@ -56,12 +56,25 @@ HISTORY_LEN = 120
 
 @dataclass
 class Telemetry:
+    rok: int | None = None
     vol: float | None = None
     flow: float | None = None
     lvl: int | None = None
     vel: float | None = None
     empty: int | None = None
+    range: int | None = None
+    flow2: int | None = None
     dir: int | None = None
+    vol_t: int | None = None
+    sect: int | None = None
+    s1: int | None = None
+    s2: int | None = None
+    s3: int | None = None
+    jl: int | None = None
+    jv: int | None = None
+    mst: str | None = None
+    csq: int | None = None
+    ber: int | None = None
     received_at: str | None = None
     raw: str | None = None
 
@@ -207,16 +220,32 @@ def on_message(_client: mqtt.Client, _userdata: Any, msg: mqtt.MQTTMessage) -> N
         return
 
     reading = Telemetry(
+        rok=data.get("rok"),
         vol=data.get("vol"),
         flow=data.get("flow"),
         lvl=data.get("lvl"),
         vel=data.get("vel"),
         empty=data.get("empty"),
+        range=data.get("range"),
+        flow2=data.get("flow2"),
         dir=data.get("dir"),
+        vol_t=data.get("vol_t"),
+        sect=data.get("sect"),
+        s1=data.get("s1"),
+        s2=data.get("s2"),
+        s3=data.get("s3"),
+        jl=data.get("jl"),
+        jv=data.get("jv"),
+        mst=data.get("mst"),
+        csq=data.get("csq"),
+        ber=data.get("ber"),
         received_at=now,
         raw=text,
     )
     state.latest = reading
+    if reading.mst:
+        state.status = str(reading.mst)
+        state.status_at = now
     state.history.append(
         {
             "t": now,
@@ -224,6 +253,7 @@ def on_message(_client: mqtt.Client, _userdata: Any, msg: mqtt.MQTTMessage) -> N
             "flow": reading.flow,
             "lvl": reading.lvl,
             "vel": reading.vel,
+            "csq": reading.csq,
         }
     )
     schedule_broadcast({"type": "telemetry", "reading": asdict(reading), "snapshot": snapshot()})

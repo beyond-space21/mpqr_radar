@@ -1,17 +1,13 @@
 #include "radar.h"
 #include "config.h"
 
-// RS-RAD-N01-3 register map (manual §4.3)
-static const uint16_t REG_VOLUME_HI = 0x03E8;  // + LO, flow×1000, level, velocity
-
 RadarSensor::RadarSensor(SoftwareSerial& bus, uint8_t dePin, uint8_t slaveAddr)
-    : bus_(bus), dePin_(dePin), slaveAddr_(slaveAddr), baud_(9600) {}
+    : bus_(bus), dePin_(dePin), slaveAddr_(slaveAddr) {}
 
 void RadarSensor::begin(uint32_t baud) {
-  baud_ = baud;
   pinMode(dePin_, OUTPUT);
   setTransmit(false);
-  bus_.begin(baud_);
+  bus_.begin(baud);
 }
 
 void RadarSensor::setTransmit(bool tx) {
@@ -33,11 +29,10 @@ uint16_t RadarSensor::crc16(const uint8_t* data, uint8_t len) {
   return crc;
 }
 
-bool RadarSensor::readRegisters(uint8_t func, uint16_t startAddr, uint16_t count,
-                                uint16_t* dest) {
+bool RadarSensor::readRegisters(uint16_t startAddr, uint16_t count, uint16_t* dest) {
   uint8_t req[8];
   req[0] = slaveAddr_;
-  req[1] = func;
+  req[1] = 0x03;
   req[2] = highByte(startAddr);
   req[3] = lowByte(startAddr);
   req[4] = highByte(count);
@@ -55,7 +50,6 @@ bool RadarSensor::readRegisters(uint8_t func, uint16_t startAddr, uint16_t count
   delayMicroseconds(50);
   bus_.write(req, sizeof(req));
   bus_.flush();
-  // Hold DE until last stop bit is out, then give bus settle time
   delay(2);
   setTransmit(false);
   delay(2);
@@ -74,24 +68,15 @@ bool RadarSensor::readRegisters(uint8_t func, uint16_t startAddr, uint16_t count
     }
   }
 
-  if (got == 0) {
-    Serial.println(F("RS485: no reply"));
-    return false;
-  }
-
   if (got < expectBytes) {
-    Serial.print(F("RS485: short "));
-    Serial.println(got);
     return false;
   }
-  if (resp[0] != slaveAddr_ || resp[1] != func || resp[2] != (count * 2)) {
-    Serial.println(F("RS485: bad header"));
+  if (resp[0] != slaveAddr_ || resp[1] != 0x03 || resp[2] != (count * 2)) {
     return false;
   }
 
   const uint16_t rxCrc = ((uint16_t)resp[got - 1] << 8) | resp[got - 2];
   if (rxCrc != crc16(resp, got - 2)) {
-    Serial.println(F("RS485: CRC fail"));
     return false;
   }
 
@@ -101,45 +86,69 @@ bool RadarSensor::readRegisters(uint8_t func, uint16_t startAddr, uint16_t count
   return true;
 }
 
-bool RadarSensor::tryReadAt(uint32_t baud, RadarReading& out) {
-  baud_ = baud;
-  bus_.begin(baud_);
-  delay(30);
-  bus_.listen();
+bool RadarSensor::readInto(TelemetryPayload& out) {
+  out.rok = 0;
+  out.vol = 0;
+  out.flow_x1000 = 0;
+  out.lvl = 0;
+  out.vel_cms = 0;
+  out.empty = 0;
+  out.range = 0;
+  out.flow2 = 0;
+  out.dir = 0;
+  out.vol_t = 0;
+  out.sect = 0;
+  out.s1 = 0;
+  out.s2 = 0;
+  out.s3 = 0;
+  out.jl = 0;
+  out.jv = 0;
 
-  // Manual allows FC 03 and 04 — try both
-  static const uint8_t kFuncs[] = {0x03, 0x04};
-  uint16_t block[5];
-
-  for (uint8_t i = 0; i < 2; i++) {
-    if (!readRegisters(kFuncs[i], REG_VOLUME_HI, 5, block)) {
-      continue;
-    }
-
-    out.volume_m3 = ((uint32_t)block[0] << 16) | block[1];
-    out.flow_m3s = block[2] / 1000.0f;
-    out.level_mm = block[3];
-    out.velocity_ms = block[4] / 100.0f;
-    out.empty_height_mm = 0;
-    out.flow_direction = 0;
-    out.valid = true;
-    return true;
+  // Primary contiguous block: vol HI/LO, flow×1000, level, velocity @ 0x03E8
+  uint16_t primary[5];
+  if (!readRegisters(0x03E8, 5, primary)) {
+    return false;
   }
-  return false;
-}
 
-bool RadarSensor::read(RadarReading& out) {
-  out.valid = false;
+  out.vol = ((uint32_t)primary[0] << 16) | primary[1];
+  out.flow_x1000 = primary[2];
+  out.lvl = primary[3];
+  out.vel_cms = primary[4];
+  out.rok = 1;
 
-  // Prefer last-known baud, then the other common factory rate
-  if (tryReadAt(baud_, out)) {
-    return true;
+  // Optional extras — ignore individual failures
+  uint16_t v = 0;
+  if (readRegisters(0x0401, 1, &v)) {
+    out.empty = v;
   }
-  const uint32_t alt = (baud_ == 9600UL) ? 4800UL : 9600UL;
-  if (tryReadAt(alt, out)) {
-    Serial.print(F("RS485: locked baud "));
-    Serial.println(baud_);
-    return true;
+  if (readRegisters(0x0422, 1, &v)) {
+    out.range = v;
   }
-  return false;
+  if (readRegisters(0x0437, 1, &v)) {
+    out.flow2 = v;
+  }
+  if (readRegisters(0x0439, 1, &v)) {
+    out.dir = (uint8_t)(v & 0x01);
+  }
+
+  uint16_t times[2];
+  if (readRegisters(0x0430, 2, times)) {
+    out.vol_t = ((uint32_t)times[0] << 16) | times[1];
+  }
+
+  uint16_t sect[4];
+  if (readRegisters(0x0412, 4, sect)) {
+    out.sect = sect[0];
+    out.s1 = sect[1];
+    out.s2 = sect[2];
+    out.s3 = sect[3];
+  }
+
+  uint16_t jumps[2];
+  if (readRegisters(0x0417, 2, jumps)) {
+    out.jl = jumps[0];
+    out.jv = jumps[1];
+  }
+
+  return true;
 }

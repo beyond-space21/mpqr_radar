@@ -1,5 +1,7 @@
 #include "cellular_mqtt.h"
 #include "config.h"
+#include <stdio.h>
+#include <string.h>
 
 CellularMqtt::CellularMqtt(SoftwareSerial& modemSerial)
     : ser_(modemSerial), modemReady_(false), mqttUp_(false), lastAttempt_(0) {}
@@ -16,14 +18,13 @@ void CellularMqtt::powerPulse() {
   if (!MODEM_HAS_PWRKEY) {
     return;
   }
-  Serial.println(F("Modem: PWRKEY pulse"));
+  Serial.println(F("[modem] PWRKEY"));
   pinMode(PIN_MODEM_PWRKEY, OUTPUT);
   digitalWrite(PIN_MODEM_PWRKEY, HIGH);
   delay(100);
   digitalWrite(PIN_MODEM_PWRKEY, LOW);
   delay(1200);
   digitalWrite(PIN_MODEM_PWRKEY, HIGH);
-  Serial.println(F("Modem: wait boot (~12s)"));
   delay(12000);
 }
 
@@ -33,10 +34,8 @@ void CellularMqtt::flushInput() {
   }
 }
 
-void CellularMqtt::sendLine(const __FlashStringHelper* c) {
-  Serial.print(F(">> "));
-  Serial.println(c);
-  ser_.println(c);
+void CellularMqtt::sendRaw(const __FlashStringHelper* cmd) {
+  ser_.println(cmd);
 }
 
 uint8_t CellularMqtt::waitFor(const char* expect, uint32_t timeoutMs) {
@@ -46,7 +45,6 @@ uint8_t CellularMqtt::waitFor(const char* expect, uint32_t timeoutMs) {
   while ((int32_t)(millis() - deadline) < 0) {
     while (ser_.available()) {
       const char c = (char)ser_.read();
-      Serial.write(c);  // mirror everything so failures are visible
       if (c == '\r') {
         continue;
       }
@@ -67,48 +65,55 @@ uint8_t CellularMqtt::waitFor(const char* expect, uint32_t timeoutMs) {
   return 0;
 }
 
-bool CellularMqtt::cmd(const __FlashStringHelper* c, const char* expect, uint32_t timeoutMs) {
+bool CellularMqtt::atCmd(const __FlashStringHelper* cmd, const char* expect, uint32_t timeoutMs) {
   flushInput();
-  sendLine(c);
+  sendRaw(cmd);
   return waitFor(expect, timeoutMs) == 1;
 }
 
+bool CellularMqtt::probeAt() {
+  flushInput();
+  ser_.println(F("AT"));
+  if (waitFor("OK", 1200) == 1) {
+    return true;
+  }
+  flushInput();
+  ser_.println(F("AT"));
+  return waitFor("OK", 1200) == 1;
+}
+
 bool CellularMqtt::findBaud() {
+  // Prefer configured baud first, then common SIM7600 rates
   static const uint32_t kRates[] = {9600, 115200, 57600, 38400, 19200};
 
   for (uint8_t i = 0; i < sizeof(kRates) / sizeof(kRates[0]); i++) {
     const uint32_t rate = kRates[i];
-    Serial.print(F("Modem: try "));
-    Serial.println(rate);
     ser_.begin(rate);
     delay(150);
-    flushInput();
-    ser_.println(F("AT"));
-    if (waitFor("OK", 1200) != 1) {
-      flushInput();
-      ser_.println(F("AT"));
-      if (waitFor("OK", 1200) != 1) {
-        continue;
-      }
+    if (!probeAt()) {
+      continue;
     }
-    Serial.print(F("\nModem: AT OK @ "));
+
+    Serial.print(F("[modem] AT OK @ "));
     Serial.println(rate);
 
     if (rate != MODEM_BAUD) {
-      Serial.print(F("Modem: set baud "));
-      Serial.println(MODEM_BAUD);
       ser_.print(F("AT+IPR="));
       ser_.println(MODEM_BAUD);
       delay(400);
       ser_.begin(MODEM_BAUD);
       delay(300);
-      flushInput();
-      ser_.println(F("AT"));
-      if (waitFor("OK", 1500) != 1) {
-        Serial.println(F("Modem: relock failed, staying at found rate"));
+      if (!probeAt()) {
+        Serial.println(F("[modem] lock to 9600 failed; staying at found baud"));
         ser_.begin(rate);
         delay(200);
+      } else {
+        Serial.print(F("[modem] UART locked "));
+        Serial.println(MODEM_BAUD);
       }
+    } else {
+      Serial.print(F("[modem] UART "));
+      Serial.println(MODEM_BAUD);
     }
     return true;
   }
@@ -120,44 +125,39 @@ bool CellularMqtt::begin() {
   mqttUp_ = false;
   ser_.listen();
 
-  Serial.println(F("Modem: bring-up"));
-
+  Serial.println(F("[modem] probing UART"));
   if (!findBaud()) {
     if (MODEM_HAS_PWRKEY) {
       powerPulse();
       if (!findBaud()) {
-        Serial.println(F("Modem: no AT response"));
+        Serial.println(F("[modem] no AT (check D2<-TX D3->RX GND)"));
         return false;
       }
     } else {
-      Serial.println(F("Modem: no AT response (TX/RX? GND? power?)"));
+      Serial.println(F("[modem] no AT (check D2<-TX D3->RX GND)"));
       return false;
     }
   }
 
-  cmd(F("ATE0"), "OK", 2000);          // echo off
-  cmd(F("AT+CMEE=2"), "OK", 2000);     // verbose errors
+  atCmd(F("ATE0"), "OK", 2000);
+  atCmd(F("AT+CMEE=2"), "OK", 2000);
 
-  // SIM state — must be READY
-  if (!cmd(F("AT+CPIN?"), "READY", 10000)) {
-    Serial.println(F("\n!! SIM not READY (inserted? PIN lock?)"));
+  if (!atCmd(F("AT+CPIN?"), "READY", 10000)) {
+    Serial.println(F("[modem] SIM not ready"));
     return false;
   }
-
-  cmd(F("AT+CSQ"), "OK", 5000);        // signal, mirrored for visibility
-  cmd(F("AT+COPS?"), "OK", 10000);     // current operator
+  Serial.println(F("[modem] SIM ready"));
 
   modemReady_ = true;
   return true;
 }
 
 bool CellularMqtt::waitRegistration() {
-  Serial.println(F("Net: waiting for registration"));
+  Serial.println(F("[modem] waiting for network"));
   const uint32_t deadline = millis() + NETWORK_WAIT_MS;
   while ((int32_t)(millis() - deadline) < 0) {
     flushInput();
-    sendLine(F("AT+CGREG?"));
-    // ",1" home / ",5" roaming
+    sendRaw(F("AT+CGREG?"));
     char buf[64];
     uint8_t n = 0;
     const uint32_t lineDeadline = millis() + 3000;
@@ -166,20 +166,18 @@ bool CellularMqtt::waitRegistration() {
         continue;
       }
       const char c = (char)ser_.read();
-      Serial.write(c);
       if (n < sizeof(buf) - 1 && c != '\r') {
         buf[n++] = c;
         buf[n] = '\0';
       }
     }
     if (strstr(buf, ",1") != nullptr || strstr(buf, ",5") != nullptr) {
-      Serial.println(F("\nNet: registered"));
+      Serial.println(F("[modem] network registered"));
       return true;
     }
-    cmd(F("AT+CSQ"), "OK", 3000);
     delay(3000);
   }
-  Serial.println(F("\nNet: registration timeout (antenna? coverage? SIM plan?)"));
+  Serial.println(F("[modem] network timeout"));
   return false;
 }
 
@@ -191,83 +189,59 @@ bool CellularMqtt::connectData() {
   char apn[32];
   copyProgmem(apn, sizeof(apn), APN);
 
-  // Define PDP context
   flushInput();
-  Serial.print(F(">> AT+CGDCONT=1,\"IP\",\""));
-  Serial.print(apn);
-  Serial.println(F("\""));
   ser_.print(F("AT+CGDCONT=1,\"IP\",\""));
   ser_.print(apn);
   ser_.println(F("\""));
   if (waitFor("OK", 5000) != 1) {
+    Serial.println(F("[modem] APN config failed"));
     return false;
   }
 
-  if (!cmd(F("AT+CGATT=1"), "OK", 30000)) {
-    Serial.println(F("\nGPRS attach failed"));
+  if (!atCmd(F("AT+CGATT=1"), "OK", 30000)) {
+    Serial.println(F("[modem] GPRS attach failed"));
     return false;
   }
 
-  // Activate PDP (needed before NETOPEN on many firmwares)
-  cmd(F("AT+CGACT=1,1"), "OK", 30000);
+  atCmd(F("AT+CGACT=1,1"), "OK", 30000);
 
-  // Open TCP/IP stack — required before CMQTTCONNECT
   flushInput();
-  sendLine(F("AT+NETOPEN"));
-  // Already open → +NETOPEN: 1  /  success → +NETOPEN: 0
-  const uint8_t net = waitFor("+NETOPEN:", 60000);
-  if (net == 0) {
-    Serial.println(F("\nNETOPEN timeout"));
+  sendRaw(F("AT+NETOPEN"));
+  if (waitFor("+NETOPEN:", 60000) == 0) {
+    Serial.println(F("[modem] NETOPEN timeout"));
     return false;
   }
-  // Drain OK line if any
   waitFor("OK", 2000);
 
-  // Show assigned IP (proves data path really works)
-  cmd(F("AT+IPADDR"), "OK", 10000);
-  Serial.println(F("\nData: ready"));
+  Serial.println(F("[modem] data ready"));
   return true;
 }
 
 void CellularMqtt::teardownMqtt() {
-  cmd(F("AT+CMQTTDISC=0,60"), "OK", 10000);
-  cmd(F("AT+CMQTTREL=0"), "OK", 5000);
-  cmd(F("AT+CMQTTSTOP"), "OK", 10000);
+  atCmd(F("AT+CMQTTDISC=0,60"), "OK", 10000);
+  atCmd(F("AT+CMQTTREL=0"), "OK", 5000);
+  atCmd(F("AT+CMQTTSTOP"), "OK", 10000);
   mqttUp_ = false;
 }
 
 bool CellularMqtt::connectMqtt() {
-  // Start service (tolerate "already started")
   flushInput();
-  sendLine(F("AT+CMQTTSTART"));
+  sendRaw(F("AT+CMQTTSTART"));
   waitFor("+CMQTTSTART: 0", 12000);
 
-  // Acquire client (tolerate "already acquired")
   char clientId[24];
   copyProgmem(clientId, sizeof(clientId), MQTT_CLIENT_ID);
   flushInput();
-  Serial.print(F(">> AT+CMQTTACCQ=0,\""));
-  Serial.print(clientId);
-  Serial.println(F("\""));
   ser_.print(F("AT+CMQTTACCQ=0,\""));
   ser_.print(clientId);
   ser_.println(F("\""));
   waitFor("OK", 5000);
 
-  // Prefer MQTT 3.1.1 (some brokers reject 3.1)
-  flushInput();
-  sendLine(F("AT+CMQTTCFG=\"version\",0,4"));
-  waitFor("OK", 3000);
+  atCmd(F("AT+CMQTTCFG=\"version\",0,4"), "OK", 3000);
 
-  // Connect
   char broker[48];
   copyProgmem(broker, sizeof(broker), MQTT_BROKER);
   flushInput();
-  Serial.print(F(">> AT+CMQTTCONNECT=0,\"tcp://"));
-  Serial.print(broker);
-  Serial.print(':');
-  Serial.print(MQTT_PORT);
-  Serial.println(F("\",60,1"));
   ser_.print(F("AT+CMQTTCONNECT=0,\"tcp://"));
   ser_.print(broker);
   ser_.print(':');
@@ -275,15 +249,16 @@ bool CellularMqtt::connectMqtt() {
   ser_.println(F("\",60,1"));
 
   if (waitFor("+CMQTTCONNECT: 0,0", 45000) != 1) {
-    Serial.println(F("\nMQTT fail (0,6 = no CONNACK: broker unreachable / port blocked)"));
-    Serial.println(F("Hint: Airtel often blocks :1883 — try :1884 or a public test broker"));
+    Serial.println(F("[mqtt] connect failed"));
     teardownMqtt();
     return false;
   }
 
-  Serial.println(F("\nMQTT connected"));
+  Serial.print(F("[mqtt] connected "));
+  Serial.print(broker);
+  Serial.print(':');
+  Serial.println(MQTT_PORT);
   mqttUp_ = true;
-  publishStatus("online");
   return true;
 }
 
@@ -350,45 +325,71 @@ bool CellularMqtt::mqttPublish(const char* topic, const char* payload, bool reta
   return true;
 }
 
-bool CellularMqtt::publishStatus(const char* status) {
+bool CellularMqtt::queryCsq(uint8_t& rssi, uint8_t& ber) {
+  rssi = 99;
+  ber = 99;
+  flushInput();
+  sendRaw(F("AT+CSQ"));
+
+  char buf[48];
+  uint8_t n = 0;
+  const uint32_t deadline = millis() + 3000;
+  while ((int32_t)(millis() - deadline) < 0) {
+    while (ser_.available()) {
+      const char c = (char)ser_.read();
+      if (c == '\r') {
+        continue;
+      }
+      if (n < sizeof(buf) - 1) {
+        buf[n++] = c;
+        buf[n] = '\0';
+      }
+      if (strstr(buf, "OK") != nullptr || strstr(buf, "ERROR") != nullptr) {
+        char* p = strstr(buf, "+CSQ:");
+        if (p != nullptr) {
+          int a = 99;
+          int b = 99;
+          if (sscanf(p, "+CSQ: %d,%d", &a, &b) >= 1) {
+            rssi = (uint8_t)a;
+            ber = (uint8_t)b;
+            return true;
+          }
+        }
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+void CellularMqtt::fillModemFields(TelemetryPayload& payload) {
+  uint8_t rssi = 99;
+  uint8_t ber = 99;
+  queryCsq(rssi, ber);
+  payload.csq = rssi;
+  payload.ber = ber;
+}
+
+bool CellularMqtt::publishTelemetry(const TelemetryPayload& payload) {
   if (!mqttUp_) {
     return false;
   }
-  char topic[40];
-  copyProgmem(topic, sizeof(topic), TOPIC_STATUS);
-  return mqttPublish(topic, status, true);
-}
 
-bool CellularMqtt::publishTelemetry(const RadarReading& reading) {
-  if (!mqttUp_ || !reading.valid) {
-    return false;
-  }
-
-  // AVR libc snprintf has no %f by default — use dtostrf
-  char flowStr[12];
-  char velStr[12];
-  dtostrf(reading.flow_m3s, 0, 3, flowStr);
-  dtostrf(reading.velocity_ms, 0, 2, velStr);
-
-  char payload[160];
-  const int n = snprintf(
-      payload, sizeof(payload),
-      "{\"vol\":%lu,\"flow\":%s,\"lvl\":%u,\"vel\":%s,\"empty\":%u,\"dir\":%u}",
-      (unsigned long)reading.volume_m3, flowStr, reading.level_mm, velStr,
-      reading.empty_height_mm, reading.flow_direction);
-
-  if (n <= 0 || n >= (int)sizeof(payload)) {
+  char json[280];
+  if (formatTelemetryJson(json, sizeof(json), payload) < 0) {
+    Serial.println(F("[mqtt] payload too large"));
     return false;
   }
 
   char topic[40];
   copyProgmem(topic, sizeof(topic), TOPIC_TELEMETRY);
-  const bool ok = mqttPublish(topic, payload, false);
-  Serial.print(F("\nPub "));
-  Serial.println(ok ? payload : "fail");
-  return ok;
+  if (!mqttPublish(topic, json, false)) {
+    return false;
+  }
+
+  copyProgmem(topic, sizeof(topic), TOPIC_STATUS);
+  mqttPublish(topic, payload.mst, true);
+  return true;
 }
 
-void CellularMqtt::loop() {
-  // Modem handles MQTT keepalive internally; nothing to do here.
-}
+void CellularMqtt::loop() {}

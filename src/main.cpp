@@ -1,11 +1,12 @@
 #include <Arduino.h>
 #include <SoftwareSerial.h>
+#include <string.h>
 
 #include "config.h"
+#include "telemetry.h"
 #include "radar.h"
 #include "cellular_mqtt.h"
 
-// Two SoftwareSerials: only one can listen at a time on AVR.
 SoftwareSerial modemSerial(PIN_MODEM_RX, PIN_MODEM_TX);
 SoftwareSerial radarSerial(PIN_RS485_RX, PIN_RS485_TX);
 
@@ -17,24 +18,24 @@ uint32_t lastPublishMs = 0;
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println(F("\nmpqr_radar — Nano + SIM7600G-H + RS-RAD-N01-3"));
+  Serial.println(F("[boot] mpqr radar"));
+  Serial.print(F("[radar] UART "));
+  Serial.println(RADAR_BAUD);
 
   radar.begin(RADAR_BAUD);
 
   if (!cellular.begin()) {
-    Serial.println(F("Modem bring-up failed; will retry in loop"));
+    Serial.println(F("[modem] init deferred"));
   }
 
   lastPublishMs = millis() - PUBLISH_INTERVAL_MS;
 }
 
 void loop() {
-  // Keep SoftSerial on the modem unless actively polling radar
   modemSerial.listen();
   cellular.ensureConnected();
   cellular.loop();
 
-  // Don't steal UART from modem until link is up (registration is fragile on SoftSerial)
   if (!cellular.mqttConnected()) {
     return;
   }
@@ -45,29 +46,38 @@ void loop() {
   }
   lastPublishMs = now;
 
+  TelemetryPayload t;
+  memset(&t, 0, sizeof(t));
+  strncpy(t.mst, "ok", sizeof(t.mst) - 1);
+  t.csq = 99;
+  t.ber = 99;
+
   radarSerial.listen();
   delay(50);
-
-  RadarReading reading;
-  const bool ok = radar.read(reading);
-
+  const bool radarOk = radar.readInto(t);
   modemSerial.listen();
   delay(20);
 
-  if (!ok) {
-    Serial.println(F("Radar read failed"));
-    // Don't spam status every cycle — publish once per failure burst is enough
-    cellular.publishStatus("radar_error");
-    return;
+  if (!radarOk) {
+    strncpy(t.mst, "radar_err", sizeof(t.mst) - 1);
+    Serial.println(F("[radar] read failed"));
+  } else {
+    Serial.print(F("[radar] lvl="));
+    Serial.print(t.lvl);
+    Serial.print(F("mm flow="));
+    Serial.print(t.flow_x1000 / 1000.0, 3);
+    Serial.print(F(" vel="));
+    Serial.println(t.vel_cms / 100.0, 2);
   }
 
-  Serial.print(F("lvl="));
-  Serial.print(reading.level_mm);
-  Serial.print(F("mm vel="));
-  Serial.print(reading.velocity_ms, 2);
-  Serial.print(F("m/s flow="));
-  Serial.println(reading.flow_m3s, 3);
+  cellular.fillModemFields(t);
+  Serial.print(F("[modem] csq="));
+  Serial.println(t.csq);
 
-  cellular.publishTelemetry(reading);
-  cellular.publishStatus("online");
+  // Always the same telemetry template
+  if (cellular.publishTelemetry(t)) {
+    Serial.println(F("[mqtt] telemetry sent"));
+  } else {
+    Serial.println(F("[mqtt] publish failed"));
+  }
 }
