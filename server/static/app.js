@@ -10,10 +10,11 @@ const els = {
   flow: $("flow"),
   vol: $("vol"),
   empty: $("empty"),
-  range: $("range"),
+  lvlRange: $("lvl-range"),
   flow2: $("flow2"),
   dir: $("dir"),
   csq: $("csq"),
+  ber: $("ber"),
   mst: $("mst"),
   sect: $("sect"),
   dims: $("dims"),
@@ -23,6 +24,10 @@ const els = {
   conns: $("conns"),
   connCount: $("conn-count"),
 };
+
+function setText(el, text) {
+  if (el) el.textContent = text;
+}
 
 function fmt(v, digits = 2) {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return "—";
@@ -45,8 +50,9 @@ function sectLabel(s) {
 }
 
 function csqLabel(c) {
-  if (c === null || c === undefined) return "—";
+  if (c === null || c === undefined || c === "") return "—";
   const n = Number(c);
+  if (Number.isNaN(n)) return "—";
   if (n === 99) return "unknown";
   // rough dBm: -113 + 2*csq
   const dbm = -113 + 2 * n;
@@ -56,39 +62,44 @@ function csqLabel(c) {
 function applySnapshot(s) {
   if (!s) return;
   const r = s.latest || {};
-  els.status.textContent = r.mst || s.status || "—";
-  els.statusMeta.textContent = s.status_at
-    ? `updated ${s.status_at}`
-    : r.received_at
-      ? `last telemetry ${r.received_at}`
-      : "waiting for MQTT…";
+  setText(els.status, r.mst || s.status || "—");
+  setText(
+    els.statusMeta,
+    s.status_at
+      ? `updated ${s.status_at}`
+      : r.received_at
+        ? `last telemetry ${r.received_at}`
+        : "waiting for MQTT…"
+  );
 
-  els.lvl.textContent = fmt(r.lvl, 0);
-  els.vel.textContent = fmt(r.vel, 2);
-  els.flow.textContent = fmt(r.flow, 3);
-  els.vol.textContent = fmt(r.vol, 0);
-  els.empty.textContent = fmt(r.empty, 0);
-  els.range.textContent = fmt(r.range, 0);
-  els.flow2.textContent = fmt(r.flow2, 0);
-  els.dir.textContent = dirLabel(r.dir);
-  els.csq.textContent = csqLabel(r.csq);
-  els.mst.textContent = r.mst || "—";
-  els.sect.textContent = sectLabel(r.sect);
+  setText(els.lvl, fmt(r.lvl, 0));
+  setText(els.vel, fmt(r.vel, 2));
+  setText(els.flow, fmt(r.flow, 3));
+  setText(els.vol, fmt(r.vol, 0));
+  setText(els.empty, fmt(r.empty, 0));
+  setText(els.lvlRange, fmt(r.range, 0));
+  setText(els.flow2, fmt(r.flow2, 0));
+  setText(els.dir, dirLabel(r.dir));
+  setText(els.csq, csqLabel(r.csq));
+  setText(els.ber, fmt(r.ber, 0));
+  setText(els.mst, r.mst || "—");
+  setText(els.sect, sectLabel(r.sect));
   if (r.s1 != null || r.s2 != null || r.s3 != null) {
-    els.dims.textContent = `${fmt(r.s1, 0)} / ${fmt(r.s2, 0)} / ${fmt(r.s3, 0)}`;
+    setText(els.dims, `${fmt(r.s1, 0)} / ${fmt(r.s2, 0)} / ${fmt(r.s3, 0)}`);
   } else {
-    els.dims.textContent = "—";
+    setText(els.dims, "—");
   }
-  els.msgCount.textContent = `${s.msg_count || 0} messages`;
+  setText(els.msgCount, `${s.msg_count || 0} messages`);
   if (s.broker) {
-    els.broker.textContent = `${s.broker.host}:${s.broker.port}`;
+    setText(els.broker, `${s.broker.host}:${s.broker.port}`);
   }
   renderConnections(s.connections || []);
   drawChart(s.history || []);
 }
 
 function renderConnections(conns) {
-  els.connCount.textContent = `${conns.length} client${conns.length === 1 ? "" : "s"}`;
+  if (!els.conns || !els.connCount) return;
+  setText(els.connCount, `${conns.length} client${conns.length === 1 ? "" : "s"}`);
   els.conns.innerHTML = "";
   if (conns.length === 0) {
     const li = document.createElement("li");
@@ -130,6 +141,7 @@ function renderConnections(conns) {
 
 function drawChart(history) {
   const canvas = els.chart;
+  if (!canvas) return;
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.clientWidth || 960;
@@ -181,7 +193,8 @@ function drawChart(history) {
 }
 
 function setConn(ok, label) {
-  els.conn.textContent = label;
+  setText(els.conn, label);
+  if (!els.dot) return;
   els.dot.classList.toggle("ok", ok);
   els.dot.classList.toggle("bad", !ok && label !== "connecting");
 }
@@ -200,9 +213,8 @@ function connectWs() {
     try {
       const msg = JSON.parse(ev.data);
       if (msg.snapshot) applySnapshot(msg.snapshot);
-      else if (msg.type === "hello") applySnapshot(msg.snapshot);
-    } catch (_) {
-      /* ignore */
+    } catch (err) {
+      console.error("dashboard update failed", err);
     }
   };
 }
