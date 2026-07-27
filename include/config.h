@@ -1,0 +1,65 @@
+#pragma once
+
+// ---------------------------------------------------------------------------
+// Hardware wiring (Arduino Nano)
+//
+ //  SIM7600G-H (SoftwareSerial; factory UART often 115200, locked to 9600 after AT)
+ //    Nano D2 (RX)  <- SIM7600 TX
+ //    Nano D3 (TX)  -> SIM7600 RX
+ //    Nano D4       -> SIM7600 PWRKEY (only if MODEM_HAS_PWRKEY; pulse turns ON or OFF)
+ //    Power the module from a dedicated supply (USB alone is usually not enough)
+ //    GND           -- common
+ //
+ //  MAX485 / RS485 transceiver (SoftwareSerial @ radar baud)
+ //    Nano D8 (RX)  <- RO
+ //    Nano D9 (TX)  -> DI
+ //    Nano D7       -> DE + RE (tied together; HIGH = TX)
+ //    A             -> radar Yellow/Green (485-A)
+ //    B             -> radar Blue (485-B)
+ //
+ //  RS-RAD-N01-3
+ //    Brown  V+  (10–30 V DC)
+ //    Black  V-
+ //    Yellow/Green 485-A
+ //    Blue          485-B
+ // ---------------------------------------------------------------------------
+
+// --- SIM7600 pins ---
+static const uint8_t PIN_MODEM_RX = 2;   // Nano listens
+static const uint8_t PIN_MODEM_TX = 3;   // Nano transmits
+static const uint8_t PIN_MODEM_PWRKEY = 4;
+// false = assume modem already powered (safer while debugging).
+// true  = pulse PWRKEY on bring-up (can turn a running modem OFF).
+static const bool MODEM_HAS_PWRKEY = false;
+static const uint32_t MODEM_BAUD = 9600;       // SoftSerial target after lock
+static const uint32_t MODEM_AUTOBAUD_MIN = 9600;
+static const uint32_t MODEM_AUTOBAUD_MAX = 115200;
+
+// --- RS485 / radar pins ---
+static const uint8_t PIN_RS485_RX = 8;
+static const uint8_t PIN_RS485_TX = 9;
+static const uint8_t PIN_RS485_DE = 7;
+static const uint32_t RADAR_BAUD = 9600;  // factory default (manual §4.1)
+static const uint8_t RADAR_SLAVE_ADDR = 0x01;
+
+// --- Cellular ---
+static const char APN[] PROGMEM = "internet";   // set to your SIM APN
+static const char GPRS_USER[] PROGMEM = "";
+static const char GPRS_PASS[] PROGMEM = "";
+
+// --- MQTT ---
+static const char MQTT_BROKER[] PROGMEM = "broker.hivemq.com";
+static const uint16_t MQTT_PORT = 1883;
+static const char MQTT_USER[] PROGMEM = "";
+static const char MQTT_PASS[] PROGMEM = "";
+static const char MQTT_CLIENT_ID[] PROGMEM = "mpqr-radar-01";
+
+// Topics (device publishes telemetry; optional command topic for future use)
+static const char TOPIC_TELEMETRY[] PROGMEM = "mpqr/radar/01/telemetry";
+static const char TOPIC_STATUS[] PROGMEM = "mpqr/radar/01/status";
+
+// --- Timing ---
+static const uint32_t PUBLISH_INTERVAL_MS = 30000UL;
+static const uint32_t MODEM_RECONNECT_MS = 10000UL;
+static const uint16_t MODBUS_RESPONSE_TIMEOUT_MS = 500;
+static const uint16_t MODBUS_INTER_FRAME_MS = 5;
