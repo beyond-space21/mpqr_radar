@@ -50,6 +50,10 @@ function applySnapshot(s) {
   if (s.broker) {
     els.broker.textContent = `${s.broker.host}:${s.broker.port}`;
   }
+  // Prefer MQTT broker link for live indicator when WS is up
+  if (s.broker_ok === false) {
+    setConn(false, "broker down");
+  }
   drawChart(s.history || []);
 }
 

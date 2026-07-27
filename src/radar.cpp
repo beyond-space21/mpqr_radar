@@ -1,21 +1,17 @@
 #include "radar.h"
 #include "config.h"
 
-// Register map (hex) — RS-RAD-N01-3 manual §4.3
-static const uint16_t REG_VOLUME_HI = 0x03E8;
-static const uint16_t REG_FLOW_X1000 = 0x03EA;
-static const uint16_t REG_LEVEL_MM = 0x03EB;
-static const uint16_t REG_VELOCITY_CMS = 0x03EC;
-static const uint16_t REG_EMPTY_HEIGHT = 0x0401;
-static const uint16_t REG_FLOW_DIR = 0x0439;
+// RS-RAD-N01-3 register map (manual §4.3)
+static const uint16_t REG_VOLUME_HI = 0x03E8;  // + LO, flow×1000, level, velocity
 
 RadarSensor::RadarSensor(SoftwareSerial& bus, uint8_t dePin, uint8_t slaveAddr)
-    : bus_(bus), dePin_(dePin), slaveAddr_(slaveAddr) {}
+    : bus_(bus), dePin_(dePin), slaveAddr_(slaveAddr), baud_(9600) {}
 
 void RadarSensor::begin(uint32_t baud) {
+  baud_ = baud;
   pinMode(dePin_, OUTPUT);
   setTransmit(false);
-  bus_.begin(baud);
+  bus_.begin(baud_);
 }
 
 void RadarSensor::setTransmit(bool tx) {
@@ -37,10 +33,11 @@ uint16_t RadarSensor::crc16(const uint8_t* data, uint8_t len) {
   return crc;
 }
 
-bool RadarSensor::readRegisters(uint16_t startAddr, uint16_t count, uint16_t* dest) {
+bool RadarSensor::readRegisters(uint8_t func, uint16_t startAddr, uint16_t count,
+                                uint16_t* dest) {
   uint8_t req[8];
   req[0] = slaveAddr_;
-  req[1] = 0x03;
+  req[1] = func;
   req[2] = highByte(startAddr);
   req[3] = lowByte(startAddr);
   req[4] = highByte(count);
@@ -49,18 +46,20 @@ bool RadarSensor::readRegisters(uint16_t startAddr, uint16_t count, uint16_t* de
   req[6] = lowByte(crc);
   req[7] = highByte(crc);
 
+  bus_.listen();
   while (bus_.available()) {
     bus_.read();
   }
 
   setTransmit(true);
-  delayMicroseconds(100);
+  delayMicroseconds(50);
   bus_.write(req, sizeof(req));
   bus_.flush();
-  delay(MODBUS_INTER_FRAME_MS);
+  // Hold DE until last stop bit is out, then give bus settle time
+  delay(2);
   setTransmit(false);
+  delay(2);
 
-  // Response: addr, func, byteCount, data[2*count], crcLo, crcHi
   const uint8_t expectBytes = 5 + (count * 2);
   uint8_t resp[64];
   if (expectBytes > sizeof(resp)) {
@@ -75,15 +74,24 @@ bool RadarSensor::readRegisters(uint16_t startAddr, uint16_t count, uint16_t* de
     }
   }
 
-  if (got < expectBytes) {
-    return false;
-  }
-  if (resp[0] != slaveAddr_ || resp[1] != 0x03 || resp[2] != (count * 2)) {
+  if (got == 0) {
+    Serial.println(F("RS485: no reply"));
     return false;
   }
 
-  const uint16_t rxCrc = (uint16_t)resp[got - 1] << 8 | resp[got - 2];
+  if (got < expectBytes) {
+    Serial.print(F("RS485: short "));
+    Serial.println(got);
+    return false;
+  }
+  if (resp[0] != slaveAddr_ || resp[1] != func || resp[2] != (count * 2)) {
+    Serial.println(F("RS485: bad header"));
+    return false;
+  }
+
+  const uint16_t rxCrc = ((uint16_t)resp[got - 1] << 8) | resp[got - 2];
   if (rxCrc != crc16(resp, got - 2)) {
+    Serial.println(F("RS485: CRC fail"));
     return false;
   }
 
@@ -93,26 +101,45 @@ bool RadarSensor::readRegisters(uint16_t startAddr, uint16_t count, uint16_t* de
   return true;
 }
 
+bool RadarSensor::tryReadAt(uint32_t baud, RadarReading& out) {
+  baud_ = baud;
+  bus_.begin(baud_);
+  delay(30);
+  bus_.listen();
+
+  // Manual allows FC 03 and 04 — try both
+  static const uint8_t kFuncs[] = {0x03, 0x04};
+  uint16_t block[5];
+
+  for (uint8_t i = 0; i < 2; i++) {
+    if (!readRegisters(kFuncs[i], REG_VOLUME_HI, 5, block)) {
+      continue;
+    }
+
+    out.volume_m3 = ((uint32_t)block[0] << 16) | block[1];
+    out.flow_m3s = block[2] / 1000.0f;
+    out.level_mm = block[3];
+    out.velocity_ms = block[4] / 100.0f;
+    out.empty_height_mm = 0;
+    out.flow_direction = 0;
+    out.valid = true;
+    return true;
+  }
+  return false;
+}
+
 bool RadarSensor::read(RadarReading& out) {
   out.valid = false;
 
-  // Contiguous block: volume HI/LO, flow×1000, level, velocity (5 regs @ 0x03E8)
-  uint16_t block[5];
-  if (!readRegisters(REG_VOLUME_HI, 5, block)) {
-    return false;
+  // Prefer last-known baud, then the other common factory rate
+  if (tryReadAt(baud_, out)) {
+    return true;
   }
-
-  uint16_t empty = 0;
-  uint16_t dir = 0;
-  const bool gotEmpty = readRegisters(REG_EMPTY_HEIGHT, 1, &empty);
-  const bool gotDir = readRegisters(REG_FLOW_DIR, 1, &dir);
-
-  out.volume_m3 = ((uint32_t)block[0] << 16) | block[1];
-  out.flow_m3s = block[2] / 1000.0f;          // enlarged ×1000
-  out.level_mm = block[3];
-  out.velocity_ms = block[4] / 100.0f;        // cm/s → m/s
-  out.empty_height_mm = gotEmpty ? empty : 0;
-  out.flow_direction = gotDir ? (uint8_t)(dir & 0x01) : 0;
-  out.valid = true;
-  return true;
+  const uint32_t alt = (baud_ == 9600UL) ? 4800UL : 9600UL;
+  if (tryReadAt(alt, out)) {
+    Serial.print(F("RS485: locked baud "));
+    Serial.println(baud_);
+    return true;
+  }
+  return false;
 }

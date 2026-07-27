@@ -29,10 +29,15 @@ void setup() {
 }
 
 void loop() {
-  // Prefer modem RX while idle / MQTT keepalive
+  // Keep SoftSerial on the modem unless actively polling radar
   modemSerial.listen();
   cellular.ensureConnected();
   cellular.loop();
+
+  // Don't steal UART from modem until link is up (registration is fragile on SoftSerial)
+  if (!cellular.mqttConnected()) {
+    return;
+  }
 
   const uint32_t now = millis();
   if (now - lastPublishMs < PUBLISH_INTERVAL_MS) {
@@ -40,17 +45,18 @@ void loop() {
   }
   lastPublishMs = now;
 
-  // Pause modem listen, poll radar over RS485 Modbus
   radarSerial.listen();
-  delay(20);
+  delay(50);
 
   RadarReading reading;
   const bool ok = radar.read(reading);
 
   modemSerial.listen();
+  delay(20);
 
   if (!ok) {
     Serial.println(F("Radar read failed"));
+    // Don't spam status every cycle — publish once per failure burst is enough
     cellular.publishStatus("radar_error");
     return;
   }
@@ -58,11 +64,10 @@ void loop() {
   Serial.print(F("lvl="));
   Serial.print(reading.level_mm);
   Serial.print(F("mm vel="));
-  Serial.print(reading.velocity_ms);
+  Serial.print(reading.velocity_ms, 2);
   Serial.print(F("m/s flow="));
-  Serial.println(reading.flow_m3s);
+  Serial.println(reading.flow_m3s, 3);
 
-  if (cellular.ensureConnected()) {
-    cellular.publishTelemetry(reading);
-  }
+  cellular.publishTelemetry(reading);
+  cellular.publishStatus("online");
 }
