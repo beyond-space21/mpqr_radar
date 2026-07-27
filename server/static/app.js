@@ -14,6 +14,8 @@ const els = {
   msgCount: $("msg-count"),
   broker: $("broker"),
   chart: $("chart"),
+  conns: $("conns"),
+  connCount: $("conn-count"),
 };
 
 function fmt(v, digits = 2) {
@@ -50,11 +52,49 @@ function applySnapshot(s) {
   if (s.broker) {
     els.broker.textContent = `${s.broker.host}:${s.broker.port}`;
   }
-  // Prefer MQTT broker link for live indicator when WS is up
-  if (s.broker_ok === false) {
-    setConn(false, "broker down");
-  }
+  renderConnections(s.connections || []);
   drawChart(s.history || []);
+}
+
+function renderConnections(conns) {
+  els.connCount.textContent = `${conns.length} client${conns.length === 1 ? "" : "s"}`;
+  els.conns.innerHTML = "";
+  if (conns.length === 0) {
+    const li = document.createElement("li");
+    li.className = "conn empty";
+    li.textContent = "No clients connected";
+    els.conns.appendChild(li);
+    return;
+  }
+  for (const c of conns) {
+    const li = document.createElement("li");
+    li.className = "conn";
+
+    const id = document.createElement("span");
+    id.className = "conn-id";
+    id.textContent = c.client_id;
+    li.appendChild(id);
+
+    if (c.is_dashboard) {
+      const tag = document.createElement("span");
+      tag.className = "conn-tag";
+      tag.textContent = "dashboard";
+      li.appendChild(tag);
+    }
+
+    const addr = document.createElement("span");
+    addr.className = "conn-addr";
+    addr.textContent = c.address || "";
+    li.appendChild(addr);
+
+    const st = document.createElement("span");
+    const stateOk = (c.state || "").includes("connected") && !(c.state || "").includes("dis");
+    st.className = `conn-state ${stateOk ? "ok" : "off"}`;
+    st.textContent = c.state || "unknown";
+    li.appendChild(st);
+
+    els.conns.appendChild(li);
+  }
 }
 
 function drawChart(history) {

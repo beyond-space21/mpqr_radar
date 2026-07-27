@@ -1,21 +1,16 @@
 """
-mpqr radar — live HTML dashboard (MQTT subscriber).
+mpqr radar — MQTT broker + live HTML dashboard.
 
-Connects to the same broker the Nano uses (config.h):
-  217.217.249.208:1883
+  MQTT : 0.0.0.0:1883
+  Web  : http://0.0.0.0:8080
 
-  Web  : http://0.0.0.0:8081
-
-Device topics:
+Device topics (from firmware config.h):
   mpqr/radar/01/telemetry
   mpqr/radar/01/status
 
 Run:
   pip install -r requirements.txt
   python main.py
-
-Override broker with env if needed:
-  MQTT_BROKER=217.217.249.208 MQTT_PORT=1883 python main.py
 """
 
 from __future__ import annotations
@@ -23,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import threading
 import time
 from collections import deque
@@ -34,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import paho.mqtt.client as mqtt
+from amqtt.broker import Broker
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -47,14 +42,10 @@ log = logging.getLogger("mpqr")
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 
-# Same broker as firmware include/config.h
-MQTT_BROKER = os.getenv("MQTT_BROKER", "217.217.249.208")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USER = os.getenv("MQTT_USER", "")
-MQTT_PASS = os.getenv("MQTT_PASS", "")
-
-WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
-WEB_PORT = int(os.getenv("WEB_PORT", "8081"))
+MQTT_HOST = "0.0.0.0"
+MQTT_PORT = 1883
+WEB_HOST = "0.0.0.0"
+WEB_PORT = 8090  # 8080/8081 are occupied by the IDE on the dev machine
 
 TOPIC_TELEMETRY = "mpqr/radar/01/telemetry"
 TOPIC_STATUS = "mpqr/radar/01/status"
@@ -83,13 +74,41 @@ class AppState:
     history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_LEN))
     msg_count: int = 0
     last_topic: str | None = None
-    broker_ok: bool = False
 
 
 state = AppState()
 ws_clients: set[WebSocket] = set()
 ws_lock = asyncio.Lock()
 main_loop: asyncio.AbstractEventLoop | None = None
+broker_ref: Broker | None = None
+
+DASHBOARD_CLIENT_ID = "mpqr-dashboard"
+
+
+def connections_snapshot() -> list[dict[str, Any]]:
+    """List sessions currently known to the embedded broker."""
+    conns: list[dict[str, Any]] = []
+    if broker_ref is None:
+        return conns
+    sessions = getattr(broker_ref, "_sessions", {})
+    for client_id, entry in list(sessions.items()):
+        session = entry[0] if isinstance(entry, tuple) else entry
+        try:
+            conn_state = str(session.transitions.state)
+        except Exception:
+            conn_state = "unknown"
+        addr = getattr(session, "remote_address", None)
+        port = getattr(session, "remote_port", None)
+        conns.append(
+            {
+                "client_id": client_id,
+                "address": f"{addr}:{port}" if addr else None,
+                "state": conn_state,
+                "is_dashboard": client_id == DASHBOARD_CLIENT_ID,
+            }
+        )
+    conns.sort(key=lambda c: (c["is_dashboard"], c["client_id"]))
+    return conns
 
 
 def utc_now() -> str:
@@ -104,12 +123,12 @@ def snapshot() -> dict[str, Any]:
         "history": list(state.history),
         "msg_count": state.msg_count,
         "last_topic": state.last_topic,
-        "broker_ok": state.broker_ok,
+        "connections": connections_snapshot(),
         "topics": {
             "telemetry": TOPIC_TELEMETRY,
             "status": TOPIC_STATUS,
         },
-        "broker": {"host": MQTT_BROKER, "port": MQTT_PORT},
+        "broker": {"host": MQTT_HOST, "port": MQTT_PORT},
         "server_time": utc_now(),
     }
 
@@ -136,23 +155,36 @@ def schedule_broadcast(event: dict[str, Any]) -> None:
     asyncio.run_coroutine_threadsafe(broadcast(event), main_loop)
 
 
+# --- Embedded MQTT broker (amqtt) -------------------------------------------------
+
+broker_config = {
+    "listeners": {
+        "default": {
+            "type": "tcp",
+            "bind": f"{MQTT_HOST}:{MQTT_PORT}",
+        }
+    },
+    "sys_interval": 0,
+    "topic-check": {"enabled": False},
+}
+
+
+async def run_broker() -> Broker:
+    broker = Broker(broker_config)
+    await broker.start()
+    log.info("MQTT broker listening on %s:%s", MQTT_HOST, MQTT_PORT)
+    return broker
+
+
+# --- Local MQTT subscriber (feeds dashboard) --------------------------------------
+
 def on_connect(client: mqtt.Client, _userdata: Any, _flags: Any, reason_code: Any, _props: Any = None) -> None:
     rc = getattr(reason_code, "value", reason_code)
     if rc == 0:
-        state.broker_ok = True
-        log.info("Connected to broker %s:%s", MQTT_BROKER, MQTT_PORT)
+        log.info("Dashboard subscriber connected")
         client.subscribe(TOPIC_WILDCARD)
-        schedule_broadcast({"type": "broker", "snapshot": snapshot()})
     else:
-        state.broker_ok = False
-        log.error("MQTT connect failed rc=%s", rc)
-
-
-def on_disconnect(_client: mqtt.Client, _userdata: Any, _flags: Any, reason_code: Any, _props: Any = None) -> None:
-    state.broker_ok = False
-    rc = getattr(reason_code, "value", reason_code)
-    log.warning("MQTT disconnected rc=%s", rc)
-    schedule_broadcast({"type": "broker", "snapshot": snapshot()})
+        log.error("MQTT subscribe connect failed rc=%s", rc)
 
 
 def on_message(_client: mqtt.Client, _userdata: Any, msg: mqtt.MQTTMessage) -> None:
@@ -198,42 +230,58 @@ def on_message(_client: mqtt.Client, _userdata: Any, msg: mqtt.MQTTMessage) -> N
     log.info("telemetry: %s", text)
 
 
-def start_subscriber() -> None:
+def start_subscriber() -> mqtt.Client:
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
         client_id="mpqr-dashboard",
         protocol=mqtt.MQTTv311,
     )
-    if MQTT_USER:
-        client.username_pw_set(MQTT_USER, MQTT_PASS)
     client.on_connect = on_connect
-    client.on_disconnect = on_disconnect
     client.on_message = on_message
 
     def _run() -> None:
         backoff = 1.0
         while True:
             try:
-                log.info("Connecting to %s:%s …", MQTT_BROKER, MQTT_PORT)
-                client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+                client.connect("127.0.0.1", MQTT_PORT, keepalive=60)
                 backoff = 1.0
                 client.loop_forever(retry_first_connection=True)
             except Exception as exc:
-                state.broker_ok = False
                 log.warning("subscriber reconnect in %.0fs (%s)", backoff, exc)
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 15.0)
 
     threading.Thread(target=_run, name="mqtt-sub", daemon=True).start()
+    return client
+
+
+# --- FastAPI ----------------------------------------------------------------------
+
+async def watch_connections() -> None:
+    """Push a fresh snapshot to the dashboard whenever broker sessions change."""
+    prev: list[dict[str, Any]] | None = None
+    while True:
+        cur = connections_snapshot()
+        if cur != prev:
+            prev = cur
+            await broadcast({"type": "connections", "snapshot": snapshot()})
+        await asyncio.sleep(2)
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
-    global main_loop
+async def lifespan(app: FastAPI):
+    global main_loop, broker_ref
     main_loop = asyncio.get_running_loop()
+    broker_ref = await run_broker()
+    await asyncio.sleep(0.3)
     start_subscriber()
-    log.info("Dashboard http://%s:%s  (broker %s:%s)", WEB_HOST, WEB_PORT, MQTT_BROKER, MQTT_PORT)
-    yield
+    watcher = asyncio.create_task(watch_connections())
+    log.info("Dashboard http://%s:%s", WEB_HOST, WEB_PORT)
+    try:
+        yield
+    finally:
+        watcher.cancel()
+        await broker_ref.shutdown()
 
 
 app = FastAPI(title="mpqr radar", lifespan=lifespan)
@@ -258,6 +306,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     try:
         await ws.send_text(json.dumps({"type": "hello", "snapshot": snapshot()}))
         while True:
+            # Keep alive; ignore client messages
             await ws.receive_text()
     except WebSocketDisconnect:
         pass

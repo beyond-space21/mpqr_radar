@@ -156,6 +156,67 @@ main {
   display: block;
 }
 
+.conns-wrap {
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+}
+
+.conns {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.conn {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.conn.empty {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.conn-id {
+  font-family: var(--mono);
+  font-weight: 500;
+}
+
+.conn-tag {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+}
+
+.conn-addr {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  margin-left: auto;
+}
+
+.conn-state {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.conn-state.ok { color: var(--accent); }
+.conn-state.off { color: var(--warn); }
+
 footer {
   padding: 0 clamp(1.25rem, 4vw, 3rem) 2rem;
   color: var(--muted);
